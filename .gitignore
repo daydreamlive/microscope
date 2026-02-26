@@ -1,0 +1,4 @@
+build/
+models/
+*.png
+.DS_Store
