@@ -129,6 +129,45 @@ bool Pipeline::init(const PipelineConfig& config) {
         fixed_noise_[i] = f32_to_f16(dist(rng));
     }
 
+    {
+        std::vector<std::pair<TensorDesc, const uint16_t*>> ins = {
+            {{"image", {1, 3, rs, rs}}, img_buf_.data()}
+        };
+        std::vector<std::pair<TensorDesc, uint16_t*>> outs = {
+            {{"latent", {1, 4, ls, ls}}, lat_buf_.data()}
+        };
+        if (!vae_encoder_.prepare(ins, outs)) {
+            fprintf(stderr, "Failed to prepare vae_encoder\n");
+            return false;
+        }
+    }
+    {
+        std::vector<std::pair<TensorDesc, const uint16_t*>> ins = {
+            {{"sample", {1, 4, ls, ls}}, noisy_.data()},
+            {{"timestep", {1}}, &timestep_f16_},
+            {{"encoder_hidden_states", {1, 77, hidden_size_}}, prompt_embeds_.data()}
+        };
+        std::vector<std::pair<TensorDesc, uint16_t*>> outs = {
+            {{"noise_pred", {1, 4, ls, ls}}, out_buf_.data()}
+        };
+        if (!unet_.prepare(ins, outs)) {
+            fprintf(stderr, "Failed to prepare unet\n");
+            return false;
+        }
+    }
+    {
+        std::vector<std::pair<TensorDesc, const uint16_t*>> ins = {
+            {{"latent", {1, 4, ls, ls}}, (const uint16_t*)prev_denoised_.data()}
+        };
+        std::vector<std::pair<TensorDesc, uint16_t*>> outs = {
+            {{"image", {1, 3, rs, rs}}, dec_buf_.data()}
+        };
+        if (!vae_decoder_.prepare(ins, outs)) {
+            fprintf(stderr, "Failed to prepare vae_decoder\n");
+            return false;
+        }
+    }
+
     fprintf(stderr, "Pipeline ready: %dx%d → latent %dx%d\n",
             rs, rs, ls, ls);
     return true;
@@ -219,11 +258,7 @@ void Pipeline::preprocess_bgra(const uint8_t* bgra) {
 }
 
 bool Pipeline::vae_encode_stage() {
-    int rs = config_.render_size;
-    int ls = latent_size_;
-    return vae_encoder_.predict(
-        "image", {1, 3, rs, rs}, img_buf_.data(),
-        "latent", {1, 4, ls, ls}, lat_buf_.data());
+    return vae_encoder_.predict_prepared();
 }
 
 void Pipeline::latent_noise_stage() {
@@ -267,20 +302,7 @@ void Pipeline::latent_noise_stage() {
 }
 
 bool Pipeline::unet_stage() {
-    int ls = latent_size_;
-    TensorDesc sample_desc{"sample", {1, 4, ls, ls}};
-    TensorDesc timestep_desc{"timestep", {1}};
-    TensorDesc embeds_desc{"encoder_hidden_states", {1, 77, hidden_size_}};
-    TensorDesc npred_desc{"noise_pred", {1, 4, ls, ls}};
-    std::vector<std::pair<TensorDesc, const uint16_t*>> unet_inputs = {
-        {sample_desc, noisy_.data()},
-        {timestep_desc, &timestep_f16_},
-        {embeds_desc, prompt_embeds_.data()}
-    };
-    std::vector<std::pair<TensorDesc, uint16_t*>> unet_outputs = {
-        {npred_desc, out_buf_.data()}
-    };
-    return unet_.predict(unet_inputs, unet_outputs);
+    return unet_.predict_prepared();
 }
 
 void Pipeline::denoise_stage() {
@@ -293,24 +315,19 @@ void Pipeline::denoise_stage() {
     for (; i + 8 <= lat_count; i += 8) {
         float16x8_t n = vld1q_f16((__fp16*)&noisy_[i]);
         float16x8_t npred = vld1q_f16((__fp16*)&out_buf_[i]);
-        vst1q_f16((__fp16*)&out_buf_[i],
+        vst1q_f16((__fp16*)&prev_denoised_[i],
                   vmulq_f16(vfmsq_f16(n, v_s1ma, npred), v_inv_sa));
     }
     for (; i < lat_count; ++i) {
         float n = f16_to_f32(noisy_[i]);
         float npred = f16_to_f32(out_buf_[i]);
-        out_buf_[i] = f32_to_f16((n - sqrt_one_minus_alpha_ * npred) * inv_sqrt_alpha_);
+        prev_denoised_[i] = f32_to_f16((n - sqrt_one_minus_alpha_ * npred) * inv_sqrt_alpha_);
     }
-    prev_denoised_.swap(out_buf_);
     has_prev_denoised_ = true;
 }
 
 bool Pipeline::vae_decode_stage() {
-    int rs = config_.render_size;
-    int ls = latent_size_;
-    return vae_decoder_.predict(
-        "latent", {1, 4, ls, ls}, prev_denoised_.data(),
-        "image", {1, 3, rs, rs}, dec_buf_.data());
+    return vae_decoder_.predict_prepared();
 }
 
 void Pipeline::postprocess_bgra(std::vector<float>& bgra_out) {

@@ -24,8 +24,12 @@ public:
 
     bool load(const std::string& path, ComputeUnit cu = ComputeUnit::CpuAndGpu);
 
-    // Run prediction with float16 (uint16_t*) buffers.
-    // Each input/output pairs a TensorDesc with a raw buffer pointer.
+    bool prepare(
+        const std::vector<std::pair<TensorDesc, const uint16_t*>>& inputs,
+        std::vector<std::pair<TensorDesc, uint16_t*>>& outputs
+    );
+    bool predict_prepared();
+
     bool predict(
         const std::vector<std::pair<TensorDesc, const uint16_t*>>& inputs,
         std::vector<std::pair<TensorDesc, uint16_t*>>& outputs
@@ -38,5 +42,7 @@ public:
     );
 
 private:
-    void* impl_; // opaque ObjC pointer (MLModel*)
+    void* impl_;
+    void* prepared_provider_;
+    void* prepared_options_;
 };

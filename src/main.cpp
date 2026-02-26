@@ -229,10 +229,18 @@ static int run_camera_mode(const std::string& model_dir,
 
         int frame_count = 0;
         auto fps_start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point prev_capture_time;
+        float latency_sum_ms = 0.0f;
+        int latency_count = 0;
 
         float ema_f = st->ema_factor;
 
         auto publish_result = [&]() {
+            auto pub_time = std::chrono::steady_clock::now();
+            float lat = std::chrono::duration<float, std::milli>(pub_time - prev_capture_time).count();
+            latency_sum_ms += lat;
+            latency_count++;
+
             pipeline.postprocess_bgra(result);
 
             if (!ema_initialized) {
@@ -273,6 +281,7 @@ static int run_camera_mode(const std::string& model_dir,
                 lstride = st->frame_stride;
                 st->frame_ready = false;
             }
+            auto capture_time = std::chrono::steady_clock::now();
 
             crop_and_resize_bgra(local_bgra.data(), lw, lh, lstride,
                                  cropped_bgra.data(), rs);
@@ -304,13 +313,16 @@ static int run_camera_mode(const std::string& model_dir,
             }
             pipeline.denoise_stage();
             has_pending_decode = true;
+            prev_capture_time = capture_time;
 
             if (++frame_count % 30 == 0) {
                 auto now = std::chrono::steady_clock::now();
                 float elapsed = std::chrono::duration<float>(now - fps_start).count();
-                fprintf(stderr, "[FPS] %.1f inference fps (%.1f ms/frame, %d frames in %.1fs)\n",
-                        frame_count / elapsed, elapsed / frame_count * 1000.0f,
-                        frame_count, elapsed);
+                float avg_lat = latency_count > 0 ? latency_sum_ms / latency_count : 0.0f;
+                fprintf(stderr, "[FPS] %.1f fps (%.1f ms/frame) | [Latency] %.1f ms avg\n",
+                        frame_count / elapsed, elapsed / frame_count * 1000.0f, avg_lat);
+                latency_sum_ms = 0.0f;
+                latency_count = 0;
             }
         }
 

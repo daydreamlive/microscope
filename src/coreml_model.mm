@@ -3,9 +3,17 @@
 #include "coreml_model.h"
 #include <cstdio>
 
-CoreMLModel::CoreMLModel() : impl_(nullptr) {}
+CoreMLModel::CoreMLModel() : impl_(nullptr), prepared_provider_(nullptr), prepared_options_(nullptr) {}
 
 CoreMLModel::~CoreMLModel() {
+    if (prepared_options_) {
+        CFBridgingRelease(prepared_options_);
+        prepared_options_ = nullptr;
+    }
+    if (prepared_provider_) {
+        CFBridgingRelease(prepared_provider_);
+        prepared_provider_ = nullptr;
+    }
     if (impl_) {
         CFBridgingRelease(impl_);
         impl_ = nullptr;
@@ -74,6 +82,70 @@ static MLMultiArray* wrapMultiArray(const std::vector<int>& shape,
                       error:&error];
     if (error) return nil;
     return arr;
+}
+
+bool CoreMLModel::prepare(
+    const std::vector<std::pair<TensorDesc, const uint16_t*>>& inputs,
+    std::vector<std::pair<TensorDesc, uint16_t*>>& outputs)
+{
+    @autoreleasepool {
+        NSMutableDictionary<NSString*, MLFeatureValue*>* inputDict =
+            [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
+
+        for (auto& [desc, data] : inputs) {
+            MLMultiArray* arr = wrapMultiArray(desc.shape, (void*)data);
+            if (!arr) return false;
+            NSString* name = [NSString stringWithUTF8String:desc.name.c_str()];
+            inputDict[name] = [MLFeatureValue featureValueWithMultiArray:arr];
+        }
+
+        NSError* error = nil;
+        MLDictionaryFeatureProvider* provider =
+            [[MLDictionaryFeatureProvider alloc] initWithDictionary:inputDict
+                                                             error:&error];
+        if (error) return false;
+
+        MLPredictionOptions* options = [[MLPredictionOptions alloc] init];
+        NSMutableDictionary<NSString*, id>* backings =
+            [NSMutableDictionary dictionaryWithCapacity:outputs.size()];
+        for (auto& [desc, data] : outputs) {
+            MLMultiArray* arr = wrapMultiArray(desc.shape, data);
+            if (!arr) return false;
+            NSString* name = [NSString stringWithUTF8String:desc.name.c_str()];
+            backings[name] = arr;
+        }
+        options.outputBackings = backings;
+
+        if (prepared_provider_) CFBridgingRelease(prepared_provider_);
+        if (prepared_options_) CFBridgingRelease(prepared_options_);
+        prepared_provider_ = (void*)CFBridgingRetain(provider);
+        prepared_options_ = (void*)CFBridgingRetain(options);
+
+        return true;
+    }
+}
+
+bool CoreMLModel::predict_prepared() {
+    @autoreleasepool {
+        MLModel* model = (__bridge MLModel*)impl_;
+        if (!model || !prepared_provider_ || !prepared_options_) return false;
+
+        MLDictionaryFeatureProvider* provider =
+            (__bridge MLDictionaryFeatureProvider*)prepared_provider_;
+        MLPredictionOptions* options =
+            (__bridge MLPredictionOptions*)prepared_options_;
+
+        NSError* error = nil;
+        id<MLFeatureProvider> result = [model predictionFromFeatures:provider
+                                                             options:options
+                                                               error:&error];
+        if (error || !result) {
+            fprintf(stderr, "CoreML predict error: %s\n",
+                    error ? [[error localizedDescription] UTF8String] : "unknown");
+            return false;
+        }
+        return true;
+    }
 }
 
 bool CoreMLModel::predict(
