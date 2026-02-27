@@ -22,7 +22,7 @@ find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
 
 # Sources
 set(SOURCES
-    src/main.cpp
+    src/main.mm
     src/tokenizer.cpp
     src/image_utils.cpp
     src/pipeline.cpp
@@ -78,9 +78,14 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-fobjc-arc"
 )
 
+# main.mm needs both ARC and fast-math
+set_source_files_properties(
+    src/main.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc -ffast-math"
+)
+
 # -ffast-math for hot-path files (excludes tokenizer.cpp which includes json.hpp using infinity)
 set_source_files_properties(
-    src/main.cpp
     src/pipeline.cpp
     PROPERTIES COMPILE_FLAGS "-ffast-math"
 )

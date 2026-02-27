@@ -20,8 +20,147 @@
 #include <sys/stat.h>
 #include <mach-o/dyld.h>
 #include <libgen.h>
+#import <Cocoa/Cocoa.h>
 
 static const char* DEFAULT_PROMPT = "oil painting style, masterpiece, highly detailed";
+
+static const char* GITHUB_RELEASE_BASE =
+    "https://github.com/livepeer/microscope/releases/latest/download/";
+
+static std::string get_models_app_support_dir() {
+    const char* home = getenv("HOME");
+    if (!home) return "";
+    return std::string(home) + "/Library/Application Support/microscope/models";
+}
+
+static bool download_and_extract(NSWindow* window, NSTextField* statusLabel,
+                                 NSProgressIndicator* progressBar,
+                                 const std::string& filename,
+                                 const std::string& dest_dir) {
+    std::string url_str = std::string(GITHUB_RELEASE_BASE) + filename;
+    NSURL* url = [NSURL URLWithString:
+        [NSString stringWithUTF8String:url_str.c_str()]];
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        statusLabel.stringValue = [NSString stringWithFormat:@"Downloading %s...",
+            filename.c_str()];
+        progressBar.indeterminate = YES;
+        [progressBar startAnimation:nil];
+    });
+
+    // Download synchronously (called from background thread)
+    NSURLSessionConfiguration* config = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession* session = [NSURLSession sessionWithConfiguration:config];
+
+    __block NSData* data = nil;
+    __block NSError* error = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    NSURLSessionDataTask* task = [session dataTaskWithURL:url
+        completionHandler:^(NSData* d, NSURLResponse* r, NSError* e) {
+            data = d;
+            error = e;
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+    if (error || !data) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            statusLabel.stringValue = [NSString stringWithFormat:@"Failed to download %s",
+                filename.c_str()];
+        });
+        return false;
+    }
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        statusLabel.stringValue = [NSString stringWithFormat:@"Extracting %s...",
+            filename.c_str()];
+    });
+
+    // Write zip to temp file
+    NSString* tmpPath = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:
+            [NSString stringWithUTF8String:filename.c_str()]];
+    [data writeToFile:tmpPath atomically:YES];
+
+    // Extract using ditto (handles zip on macOS)
+    NSString* destPath = [NSString stringWithUTF8String:dest_dir.c_str()];
+    NSTask* unzip = [[NSTask alloc] init];
+    unzip.launchPath = @"/usr/bin/ditto";
+    unzip.arguments = @[@"-xk", tmpPath, destPath];
+    [unzip launch];
+    [unzip waitUntilExit];
+
+    [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
+
+    return unzip.terminationStatus == 0;
+}
+
+static bool has_file(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+static bool show_download_dialog(const std::string&) {
+    std::string dest = get_models_app_support_dir();
+    if (dest.empty()) return false;
+
+    // Figure out what needs downloading
+    bool need_base = !has_file(dest + "/vocab.json");
+    bool need_turbo = !has_file(dest + "/unet_sd_turbo.mlmodelc");
+
+    if (!need_base && !need_turbo) return true;
+
+    // Create directory
+    [[NSFileManager defaultManager]
+        createDirectoryAtPath:[NSString stringWithUTF8String:dest.c_str()]
+        withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // Setup progress window
+    NSWindow* window = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 420, 140)
+                  styleMask:NSWindowStyleMaskTitled
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    window.title = @"Microscope — Downloading Models";
+    [window center];
+
+    NSTextField* statusLabel = [NSTextField labelWithString:@"Preparing..."];
+    statusLabel.frame = NSMakeRect(20, 90, 380, 20);
+    [window.contentView addSubview:statusLabel];
+
+    NSProgressIndicator* progressBar = [[NSProgressIndicator alloc]
+        initWithFrame:NSMakeRect(20, 55, 380, 20)];
+    progressBar.style = NSProgressIndicatorStyleBar;
+    progressBar.indeterminate = YES;
+    [window.contentView addSubview:progressBar];
+
+    [window makeKeyAndOrderFront:nil];
+
+    __block bool success = true;
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if (need_base) {
+            if (!download_and_extract(window, statusLabel, progressBar,
+                                      "models-base.zip", dest))
+                success = false;
+        }
+        if (success && need_turbo) {
+            if (!download_and_extract(window, statusLabel, progressBar,
+                                      "models-sd-turbo.zip", dest))
+                success = false;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [window close];
+            [NSApp stopModal];
+        });
+    });
+
+    [NSApp runModalForWindow:window];
+    return success;
+}
 
 static bool is_valid_model_dir(const std::string& path) {
     struct stat st;
@@ -470,7 +609,7 @@ static int run_camera_mode(const std::string& model_dir,
 
 int main(int argc, char** argv) {
     std::string model_dir;
-    std::string model_name = "sdxs";
+    std::string model_name = "sd-turbo";
     std::string image_path;
     std::string prompt;
     std::string output_path = "output.png";
@@ -519,12 +658,26 @@ int main(int argc, char** argv) {
         model_dir = find_model_dir();
     }
     if (model_dir.empty()) {
-        fprintf(stderr, "Error: models not found. Searched:\n");
-        fprintf(stderr, "  ~/Library/Application Support/microscope/models/\n");
-        fprintf(stderr, "  <adjacent to app>/models/\n");
-        fprintf(stderr, "  Use --model-dir <path> to specify manually.\n\n");
-        usage(argv[0]);
-        return 1;
+        fprintf(stderr, "Models not found — starting automatic download\n");
+
+        @autoreleasepool {
+            [NSApplication sharedApplication];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+            if (show_download_dialog(model_name)) {
+                model_dir = get_models_app_support_dir();
+                fprintf(stderr, "Models installed: %s\n", model_dir.c_str());
+            } else {
+                NSAlert* errAlert = [[NSAlert alloc] init];
+                errAlert.messageText = @"Download Failed";
+                errAlert.informativeText =
+                    @"Could not download models. Check your internet connection "
+                     "and try again.";
+                errAlert.alertStyle = NSAlertStyleCritical;
+                [errAlert runModal];
+                return 1;
+            }
+        }
     }
 
     if (!image_path.empty()) {
