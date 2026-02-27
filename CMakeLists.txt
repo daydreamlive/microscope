@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(microscope LANGUAGES C CXX OBJCXX)
 
+set(MICROSCOPE_VERSION "0.1.0")
+option(BUILD_APP_BUNDLE "Build as macOS .app bundle" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_STANDARD 17)
@@ -28,7 +31,27 @@ set(SOURCES
     src/display.mm
 )
 
-add_executable(microscope ${SOURCES})
+if(BUILD_APP_BUNDLE)
+    add_executable(microscope MACOSX_BUNDLE ${SOURCES})
+    set_target_properties(microscope PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "Microscope"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.livepeer.microscope"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${MICROSCOPE_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${MICROSCOPE_VERSION}"
+        OUTPUT_NAME "Microscope"
+    )
+    if(EXISTS "${CMAKE_SOURCE_DIR}/resources/AppIcon.icns")
+        set_source_files_properties(
+            "${CMAKE_SOURCE_DIR}/resources/AppIcon.icns"
+            PROPERTIES MACOSX_PACKAGE_LOCATION "Resources"
+        )
+        target_sources(microscope PRIVATE "${CMAKE_SOURCE_DIR}/resources/AppIcon.icns")
+    endif()
+else()
+    add_executable(microscope ${SOURCES})
+endif()
 
 target_include_directories(microscope PRIVATE
     src

@@ -17,8 +17,71 @@
 #include <memory>
 #include <future>
 #include <dispatch/dispatch.h>
+#include <sys/stat.h>
+#include <mach-o/dyld.h>
+#include <libgen.h>
 
 static const char* DEFAULT_PROMPT = "oil painting style, masterpiece, highly detailed";
+
+static bool is_valid_model_dir(const std::string& path) {
+    struct stat st;
+    std::string vocab = path + "/vocab.json";
+    std::string merges = path + "/merges.txt";
+    return (stat(vocab.c_str(), &st) == 0 && stat(merges.c_str(), &st) == 0);
+}
+
+static std::string get_executable_dir() {
+    char buf[4096];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) return "";
+    char* resolved = realpath(buf, nullptr);
+    if (!resolved) return "";
+    std::string dir = dirname(resolved);
+    free(resolved);
+    return dir;
+}
+
+static std::string find_model_dir() {
+    // 1. ~/Library/Application Support/microscope/models/
+    const char* home = getenv("HOME");
+    if (home) {
+        std::string app_support = std::string(home) +
+            "/Library/Application Support/microscope/models";
+        if (is_valid_model_dir(app_support)) {
+            fprintf(stderr, "Models found: %s\n", app_support.c_str());
+            return app_support;
+        }
+    }
+
+    std::string exe_dir = get_executable_dir();
+    if (!exe_dir.empty()) {
+        // 2. Adjacent to .app bundle (exe is at Microscope.app/Contents/MacOS/Microscope)
+        std::string app_adjacent = exe_dir + "/../../../models";
+        char* resolved = realpath(app_adjacent.c_str(), nullptr);
+        if (resolved) {
+            std::string path(resolved);
+            free(resolved);
+            if (is_valid_model_dir(path)) {
+                fprintf(stderr, "Models found: %s\n", path.c_str());
+                return path;
+            }
+        }
+
+        // 3. Adjacent to CLI binary (exe is at build/microscope)
+        std::string cli_adjacent = exe_dir + "/../models";
+        resolved = realpath(cli_adjacent.c_str(), nullptr);
+        if (resolved) {
+            std::string path(resolved);
+            free(resolved);
+            if (is_valid_model_dir(path)) {
+                fprintf(stderr, "Models found: %s\n", path.c_str());
+                return path;
+            }
+        }
+    }
+
+    return "";
+}
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
@@ -190,6 +253,16 @@ static int run_camera_mode(const std::string& model_dir,
         st->cam_write_buf.resize(h * row_bytes);
         for (int y = 0; y < h; ++y)
             memcpy(&st->cam_write_buf[y * row_bytes], bgra + y * stride, row_bytes);
+
+        // Update camera display pane at camera-native fps (decoupled from inference)
+        {
+            std::lock_guard<std::mutex> lock(st->crop_mutex);
+            crop_and_resize_bgra(st->cam_write_buf.data(), w, h, row_bytes,
+                                 st->cropped_bgra.data(), st->rs);
+            st->crop_ready = true;
+        }
+        st->display_dirty.store(true, std::memory_order_release);
+
         {
             std::lock_guard<std::mutex> lock(st->frame_mutex);
             st->latest_frame_bgra.swap(st->cam_write_buf);
@@ -285,13 +358,6 @@ static int run_camera_mode(const std::string& model_dir,
 
             crop_and_resize_bgra(local_bgra.data(), lw, lh, lstride,
                                  cropped_bgra.data(), rs);
-
-            {
-                std::lock_guard<std::mutex> lock(st->crop_mutex);
-                memcpy(st->cropped_bgra.data(), cropped_bgra.data(), pixel_count_4);
-                st->crop_ready = true;
-            }
-            st->display_dirty.store(true, std::memory_order_release);
 
             pipeline.preprocess_bgra(cropped_bgra.data());
             if (!pipeline.vae_encode_stage()) continue;
@@ -450,7 +516,13 @@ int main(int argc, char** argv) {
     }
 
     if (model_dir.empty()) {
-        fprintf(stderr, "Error: --model-dir is required\n\n");
+        model_dir = find_model_dir();
+    }
+    if (model_dir.empty()) {
+        fprintf(stderr, "Error: models not found. Searched:\n");
+        fprintf(stderr, "  ~/Library/Application Support/microscope/models/\n");
+        fprintf(stderr, "  <adjacent to app>/models/\n");
+        fprintf(stderr, "  Use --model-dir <path> to specify manually.\n\n");
         usage(argv[0]);
         return 1;
     }
