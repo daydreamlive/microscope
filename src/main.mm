@@ -25,7 +25,7 @@
 static const char* DEFAULT_PROMPT = "oil painting style, masterpiece, highly detailed";
 
 static const char* GITHUB_RELEASE_BASE =
-    "https://github.com/livepeer/microscope/releases/latest/download/";
+    "https://github.com/daydreamlive/microscope/releases/download/models/";
 
 static std::string get_models_app_support_dir() {
     const char* home = getenv("HOME");

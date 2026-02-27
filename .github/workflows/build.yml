@@ -119,6 +119,17 @@ jobs:
           name: Microscope-${{ steps.config.outputs.version }}-macos-arm64
           path: build/Microscope.dmg
 
+      - name: Download model zips from models release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build/models-release
+          gh release download models \
+            --pattern "models-*.zip" \
+            --dir build/models-release \
+            || echo "::warning::No models release found — release will not include model zips"
+
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -126,10 +137,16 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           mv build/Microscope.dmg "build/Microscope-${VERSION}-macos-arm64.dmg"
+
+          ASSETS=("build/Microscope-${VERSION}-macos-arm64.dmg")
+          for f in build/models-release/models-*.zip; do
+            [ -f "$f" ] && ASSETS+=("$f")
+          done
+
           gh release create "$GITHUB_REF_NAME" \
             --title "Microscope $VERSION" \
             --generate-notes \
-            "build/Microscope-${VERSION}-macos-arm64.dmg"
+            "${ASSETS[@]}"
 
       - name: Cleanup keychain
         if: always()
