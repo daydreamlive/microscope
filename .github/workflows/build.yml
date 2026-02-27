@@ -20,13 +20,16 @@ jobs:
 
       - name: Determine build config
         id: config
+        env:
+          HAS_SIGNING_SECRETS: ${{ secrets.CI_MACOS_CERTIFICATE_BASE64 != '' && secrets.CI_MACOS_CERTIFICATE_PASSWORD != '' && secrets.CI_MACOS_CERTIFICATE_ID != '' }}
+          HAS_NOTARIZE_SECRETS: ${{ secrets.CI_MACOS_NOTARIZATION_USER != '' && secrets.CI_MACOS_NOTARIZATION_PASSWORD != '' && secrets.CI_MACOS_TEAM_ID != '' }}
         run: |
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "codesign=true" >> "$GITHUB_OUTPUT"
-            echo "notarize=true" >> "$GITHUB_OUTPUT"
+            echo "codesign=${HAS_SIGNING_SECRETS}" >> "$GITHUB_OUTPUT"
+            echo "notarize=${HAS_NOTARIZE_SECRETS}" >> "$GITHUB_OUTPUT"
             echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "codesign=true" >> "$GITHUB_OUTPUT"
+            echo "codesign=${HAS_SIGNING_SECRETS}" >> "$GITHUB_OUTPUT"
             echo "notarize=false" >> "$GITHUB_OUTPUT"
             echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
           else
@@ -35,11 +38,15 @@ jobs:
             echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
           fi
 
+          if [[ "${HAS_SIGNING_SECRETS}" != "true" ]]; then
+            echo "::warning::Signing secrets not configured — building unsigned app"
+          fi
+
       - name: Setup signing
         if: steps.config.outputs.codesign == 'true'
         env:
-          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          CERTIFICATE_BASE64: ${{ secrets.CI_MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CI_MACOS_CERTIFICATE_PASSWORD }}
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
           CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
@@ -66,7 +73,7 @@ jobs:
       - name: Sign app
         if: steps.config.outputs.codesign == 'true'
         env:
-          CODESIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          CODESIGN_IDENTITY: ${{ secrets.CI_MACOS_CERTIFICATE_ID }}
         run: |
           codesign --force --deep --options runtime --timestamp \
             --sign "$CODESIGN_IDENTITY" \
@@ -79,7 +86,7 @@ jobs:
       - name: Sign DMG
         if: steps.config.outputs.codesign == 'true'
         env:
-          CODESIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          CODESIGN_IDENTITY: ${{ secrets.CI_MACOS_CERTIFICATE_ID }}
         run: |
           codesign --force --timestamp \
             --sign "$CODESIGN_IDENTITY" \
@@ -88,9 +95,9 @@ jobs:
       - name: Notarize
         if: steps.config.outputs.notarize == 'true'
         env:
-          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_USER }}
-          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
-          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          APPLE_ID: ${{ secrets.CI_MACOS_NOTARIZATION_USER }}
+          APPLE_PASSWORD: ${{ secrets.CI_MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.CI_MACOS_TEAM_ID }}
         run: |
           xcrun notarytool store-credentials "microscope-notarize" \
             --apple-id "$APPLE_ID" \
