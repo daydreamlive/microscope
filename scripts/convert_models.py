@@ -242,13 +242,11 @@ def export_tokenizer(model_id, output_dir):
     tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
 
     import json
+    import shutil
     with open(vocab_path, "w") as f:
-        json.dump(tokenizer.encoder, f)
+        json.dump(tokenizer.get_vocab(), f)
 
-    with open(merges_path, "w") as f:
-        f.write("#version: 0.2\n")
-        for merge in tokenizer.bpe_ranks.keys():
-            f.write(f"{merge[0]} {merge[1]}\n")
+    shutil.copy2(tokenizer._merges, merges_path)
 
     print(f"  Saved: {vocab_path}, {merges_path}")
 
